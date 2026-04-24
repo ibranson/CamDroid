@@ -16,19 +16,33 @@ binding is installed at the system level via `apt`, and the venv layers
 the Python deps (`fastapi`, `uvicorn`, `pillow`, ...) on top. This avoids
 re-compiling `libgphoto2` bindings inside the venv.
 
-## Stage 1 smoke test
+## Smoke tests
 
-With the camera plugged in and powered on:
+Stage 1 (just the camera wrapper, prints to stdout):
 
 ```bash
-source ~/CamDroid/pi/.venv/bin/activate
-cd ~/CamDroid/pi
+source .venv/bin/activate
 python -m scripts.smoke_test ~/camdroid-images
 ```
 
-Press the shutter on the camera. Each press should print a line in the
-terminal and write the JPG to `~/camdroid-images/`. Ctrl-C to exit.
+Stage 2 (camera + storage + variants + SQLite index):
 
-This is the same behavior as `gphoto2 --capture-tethered`, but in our
-own Python code, with our state machine and our event hooks — the
-foundation that the API and admin daemon will build on.
+```bash
+python -m scripts.smoke_test_2 ~/camdroid-storage
+```
+
+## Run the daemon (Stage 3+)
+
+```bash
+source .venv/bin/activate
+camdroid ~/camdroid-storage
+# or:
+python -m camdroid ~/camdroid-storage
+```
+
+Defaults to binding `0.0.0.0:8080`. Once running, point a browser at
+`http://camdroid.local:8080/api/v0/status` to see the live snapshot.
+
+After re-installing dependencies (e.g. after pulling new code), run
+`pip install -e .` again from `pi/` to refresh the `camdroid` script
+entry point.
