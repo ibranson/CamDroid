@@ -1,0 +1,56 @@
+# --- Python (Pi daemon) ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Android Studio / Gradle / Kotlin ---
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+app/release/
+*.apk
+*.aab
+*.ap_
+*.dex
+# Keystores must never be committed
+*.keystore
+*.jks
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Editors ---
+.vscode/
+*.swp
+*~
+
+# --- Claude Code session state ---
+.claude/
+
+# --- Project-local test artifacts ---
+test-images/
+*.JPG
+*.NEF
+*.CR2
+*.CR3
+*.ARW
+z7-config.txt
+*-config.txt
