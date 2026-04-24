@@ -14,6 +14,7 @@ from PIL import Image
 
 log = logging.getLogger(__name__)
 
+_TAG_EXIF_IFD_POINTER = 0x8769  # 34665
 _TAG_EXPOSURE_TIME = 33434
 _TAG_FNUMBER = 33437
 _TAG_ISO = 34855
@@ -39,25 +40,31 @@ def read_shooting_exif(jpg_path: Path) -> ShootingExif:
             if ex is None:
                 return out
 
-            iso = ex.get(_TAG_ISO)
+            # Shooting params live in the EXIF sub-IFD, not the main IFD.
+            try:
+                exif_ifd = ex.get_ifd(_TAG_EXIF_IFD_POINTER)
+            except Exception:
+                exif_ifd = {}
+
+            iso = exif_ifd.get(_TAG_ISO)
             if iso is not None:
                 try:
                     out.iso = int(iso) if not isinstance(iso, tuple) else int(iso[0])
                 except (TypeError, ValueError):
                     pass
 
-            shutter = ex.get(_TAG_EXPOSURE_TIME)
+            shutter = exif_ifd.get(_TAG_EXPOSURE_TIME)
             if shutter is not None:
                 out.shutter = _format_shutter(shutter)
 
-            fnum = ex.get(_TAG_FNUMBER)
+            fnum = exif_ifd.get(_TAG_FNUMBER)
             if fnum is not None:
                 try:
                     out.aperture = float(fnum)
                 except (TypeError, ValueError):
                     pass
 
-            fl = ex.get(_TAG_FOCAL_LENGTH)
+            fl = exif_ifd.get(_TAG_FOCAL_LENGTH)
             if fl is not None:
                 try:
                     out.focal_length = float(fl)
