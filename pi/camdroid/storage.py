@@ -28,7 +28,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from camdroid.camera import CapturedFile
 from camdroid.exif import ShootingExif, read_shooting_exif
@@ -102,9 +102,15 @@ class ImageStorage:
 
         shutil.move(str(captured.path), str(full_path))
 
-        # Decode once, resample twice.
-        with Image.open(full_path) as img:
-            img.load()
+        # Decode once, apply EXIF orientation (physically rotate the pixels),
+        # then resample twice. We strip EXIF on save, so the variants must be
+        # in display-correct orientation as bytes — viewers can't rotate them
+        # by tag if the tag is gone. The original full.jpg keeps the camera's
+        # EXIF, and EXIF-aware viewers (incl. Coil) rotate it at display time.
+        with Image.open(full_path) as raw_img:
+            raw_img.load()
+            img = ImageOps.exif_transpose(raw_img)
+            display_w, display_h = img.width, img.height
             preview = img.copy()
             preview.thumbnail((PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE), Image.Resampling.LANCZOS)
             preview.save(preview_path, "JPEG", quality=PREVIEW_QUALITY, optimize=True)
@@ -113,13 +119,18 @@ class ImageStorage:
             thumb.save(thumb_path, "JPEG", quality=THUMB_QUALITY, optimize=True)
 
         exif = read_shooting_exif(full_path)
+        # Override stored dimensions with post-rotation values so the metadata
+        # always reflects how the image will be displayed, not the raw sensor
+        # orientation. This matters for the Android UI's aspect-ratio decisions.
+        exif.width = display_w
+        exif.height = display_h
         rec = ImageRecord(
             id=record_id,
             captured_at=ts,
             captured_at_iso=captured_iso,
             camera_filename=captured.camera_filename,
-            width=exif.width or 0,
-            height=exif.height or 0,
+            width=display_w,
+            height=display_h,
             full_size=full_path.stat().st_size,
             preview_size=preview_path.stat().st_size,
             thumb_size=thumb_path.stat().st_size,
