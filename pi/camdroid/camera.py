@@ -165,11 +165,20 @@ class Camera:
         cam = self._camera
         assert cam is not None
         log.info("capture loop running")
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 5
         while not self._stop.is_set():
             try:
                 event_type, event_data = cam.wait_for_event(1000)  # ms
+                consecutive_errors = 0
             except gp.GPhoto2Error as e:
                 log.error("wait_for_event raised: %s", e)
+                consecutive_errors += 1
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    # Camera has been unreachable for several iterations — escalate
+                    # to a hard failure so the daemon's reconnect loop can take over.
+                    self._set_state(CameraState.PTP_FAILED, f"capture loop gave up after {consecutive_errors} errors")
+                    return
                 self._set_state(CameraState.PTP_DEGRADED, f"wait_for_event: {e}")
                 time.sleep(0.5)
                 continue

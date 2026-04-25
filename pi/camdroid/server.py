@@ -37,6 +37,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+RECONNECT_INTERVAL_SECONDS = 5
+
+
 def _build_lifespan(*, storage: ImageStorage, staging_dir: Path, session_id: str):
     """Returns a lifespan ctx manager that owns the bus + camera and mounts
     the API routes once the asyncio loop is up."""
@@ -63,13 +66,47 @@ def _build_lifespan(*, storage: ImageStorage, staging_dir: Path, session_id: str
             on_state_change=on_state,
         )
 
-        # Try to connect. If the camera is missing/busy, keep serving anyway so
-        # the API can report the failed state. User fixes and restarts the daemon.
+        # First connect attempt. If it fails, keep serving anyway — the
+        # reconnect_loop task below will keep trying every few seconds.
         try:
             camera.connect()
             camera.start_capture_loop()
         except Exception:
-            log.exception("camera.connect failed; API will serve in failed state")
+            log.info("camera not available at startup; will keep retrying")
+
+        async def reconnect_loop() -> None:
+            """Periodically re-attempt connection while the camera is in a
+            non-working state (failed, missing, or unknown). Lets the user
+            power the camera on or plug it in without cycling the daemon."""
+            recoverable = {
+                CameraState.PTP_FAILED,
+                CameraState.NO_USB,
+                CameraState.UNKNOWN,
+            }
+            while True:
+                try:
+                    await asyncio.sleep(RECONNECT_INTERVAL_SECONDS)
+                    if camera.state not in recoverable:
+                        continue
+                    log.debug("reconnect attempt; current state=%s", camera.state.value)
+                    try:
+                        # disconnect() is a no-op if there's nothing to clean up;
+                        # safe to call before each retry to clear stale handles.
+                        camera.disconnect()
+                    except Exception:
+                        pass
+                    try:
+                        camera.connect()
+                        camera.start_capture_loop()
+                        log.info("camera reconnected: %s", camera.info.model if camera.info else "?")
+                    except Exception as e:
+                        log.debug("reconnect attempt failed: %s", e)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("unexpected error in reconnect_loop")
+
+        reconnect_task = asyncio.create_task(reconnect_loop(), name="camdroid-reconnect")
 
         # Mount the routed app onto the live FastAPI shell now that bus + camera
         # exist. (build_app needs them at construction time because the route
@@ -84,6 +121,11 @@ def _build_lifespan(*, storage: ImageStorage, staging_dir: Path, session_id: str
         try:
             yield
         finally:
+            reconnect_task.cancel()
+            try:
+                await reconnect_task
+            except asyncio.CancelledError:
+                pass
             camera.stop_capture_loop()
             camera.disconnect()
 
