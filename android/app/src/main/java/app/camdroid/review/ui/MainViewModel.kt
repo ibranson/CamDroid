@@ -80,6 +80,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             Config.FALLBACK_ADDRESS
         }
         appendLog("Pi address: ${address.host}:${address.port}")
+        // Update the global so Composables that build image URLs (thumb,
+        // preview, full) see the resolved address.
+        Config.setActiveAddress(address)
         stream = EventStream(address.wsUrl)
         api = ApiClient(address.baseUrl)
 

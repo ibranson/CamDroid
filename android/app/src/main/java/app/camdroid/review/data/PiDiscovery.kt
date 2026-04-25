@@ -91,7 +91,11 @@ class PiDiscovery(private val context: Context) {
         var resolveInProgress = false
         var resolved = false
 
-        val listener = object : NsdManager.DiscoveryListener {
+        // Declared as var (initialized non-null on the next line) so the nested
+        // ResolveListener below can reference it; a `val` with the object literal
+        // would be a forward-reference compile error.
+        var listener: NsdManager.DiscoveryListener? = null
+        listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
                 Log.d(tag, "discovery started: $serviceType")
             }
@@ -132,7 +136,7 @@ class PiDiscovery(private val context: Context) {
                         }
                         resolved = true
                         try {
-                            nsdManager.stopServiceDiscovery(listener)
+                            nsdManager.stopServiceDiscovery(listener!!)
                         } catch (_: Exception) { }
                         if (cont.isActive) cont.resume(PiAddress(host, port))
                     }
@@ -146,7 +150,7 @@ class PiDiscovery(private val context: Context) {
         }
 
         try {
-            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener!!)
         } catch (e: Exception) {
             Log.e(tag, "discoverServices threw: ${e.message}")
             safeRelease(multicastLock)
@@ -154,7 +158,7 @@ class PiDiscovery(private val context: Context) {
         }
 
         cont.invokeOnCancellation {
-            try { nsdManager.stopServiceDiscovery(listener) } catch (_: Exception) { }
+            try { nsdManager.stopServiceDiscovery(listener!!) } catch (_: Exception) { }
             safeRelease(multicastLock)
         }
     }

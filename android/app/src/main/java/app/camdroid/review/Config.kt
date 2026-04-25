@@ -18,4 +18,20 @@ object Config {
     const val DISCOVERY_TIMEOUT_MS = 8000L
 
     val FALLBACK_ADDRESS = PiAddress(FALLBACK_HOST, FALLBACK_PORT)
+
+    /**
+     * Current Pi base URL. Initialized to the fallback so composable URL
+     * construction (e.g. thumbnail/preview model strings) doesn't crash before
+     * discovery completes; updated by [setActiveAddress] once the ViewModel
+     * has resolved the real address. Single-instance app, single-process —
+     * mutable global is fine here and avoids plumbing the address through
+     * every Composable that builds an image URL.
+     */
+    @Volatile
+    var BASE_URL: String = "http://$FALLBACK_HOST:$FALLBACK_PORT"
+        private set
+
+    fun setActiveAddress(address: PiAddress) {
+        BASE_URL = address.baseUrl
+    }
 }
