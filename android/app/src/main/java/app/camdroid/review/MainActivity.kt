@@ -1,10 +1,24 @@
 package app.camdroid.review
 
+import android.Manifest
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.os.BatteryManager
+import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import app.camdroid.review.service.ConnectionService
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -76,6 +90,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.drop
 import app.camdroid.review.data.EventStream
 import app.camdroid.review.data.ImageSummary
+import app.camdroid.review.ui.CameraDetailsDialog
+import app.camdroid.review.ui.ConnectionDetailsDialog
 import app.camdroid.review.ui.ExifPanel
 import app.camdroid.review.ui.LockButton
 import app.camdroid.review.ui.MainViewModel
@@ -88,15 +104,119 @@ import me.saket.telephoto.zoomable.rememberZoomableState
 import me.saket.telephoto.zoomable.zoomable
 
 class MainActivity : ComponentActivity() {
+
+    private var hasBeenStopped = false
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            applyKeepScreenOn(isPlugged = isCurrentlyPlugged())
+        }
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        // The service runs regardless of whether the user grants the
+        // notification permission — without it, on Android 13+ the system
+        // simply doesn't show the foreground-service notification, but the
+        // process-keep-alive guarantee still applies.
+        ConnectionService.start(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // KEEP_SCREEN_ON is power-aware: held while the tablet is plugged in
+        // (active shoot, dock), released on battery (saves drain when the
+        // tablet is being carried around or set down). The system-default
+        // display timeout still applies when not plugged.
+        applyKeepScreenOn(isPlugged = isCurrentlyPlugged())
+
+        // Foreground service keeps the WS connection alive across brief
+        // backgrounds (notifications, phone calls, app switcher peeks).
+        ensureConnectionService()
+
+        // Lifecycle observer: when the app re-enters the foreground after
+        // having been STOPPED (screen sleep, app backgrounded), reset
+        // session-scoped UI state. See feedback_camdroid_lock_semantics.
+        lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStop(owner: LifecycleOwner) {
+                hasBeenStopped = true
+            }
+            override fun onStart(owner: LifecycleOwner) {
+                if (hasBeenStopped) {
+                    hasBeenStopped = false
+                    val vmInstance: MainViewModel? = viewModelInstance
+                    vmInstance?.onAppForegroundedAfterStop()
+                }
+            }
+        })
+
         setContent {
             CamDroidReviewTheme {
                 val vm: MainViewModel = viewModel()
+                viewModelInstance = vm
                 val ui by vm.ui.collectAsState()
                 ReviewScreen(ui = ui, current = vm.currentImage, vm = vm)
             }
+        }
+    }
+
+    /** Captured at first composition so the lifecycle observer (which fires
+     *  outside the Composable scope) can reach the ViewModel. Cleared in
+     *  onDestroy below. */
+    private var viewModelInstance: MainViewModel? = null
+
+    override fun onResume() {
+        super.onResume()
+        // Sticky-register so we get the current power state immediately too.
+        registerReceiver(
+            powerReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+            }
+        )
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try { unregisterReceiver(powerReceiver) } catch (_: IllegalArgumentException) { }
+    }
+
+    override fun onDestroy() {
+        viewModelInstance = null
+        super.onDestroy()
+    }
+
+    private fun isCurrentlyPlugged(): Boolean {
+        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val plugged = intent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        // Any non-zero plugged value (AC, USB, wireless, dock) counts as "on power."
+        return plugged != 0
+    }
+
+    private fun applyKeepScreenOn(isPlugged: Boolean) {
+        if (isPlugged) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    private fun ensureConnectionService() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                ConnectionService.start(this)
+            } else {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } else {
+            // Android 12 and earlier: notifications don't require runtime permission.
+            ConnectionService.start(this)
         }
     }
 }
@@ -111,6 +231,30 @@ private fun ReviewScreen(ui: UiState, current: ImageSummary?, vm: MainViewModel)
             eventLogVisible = ui.showEventLog,
             onToggleEventLog = { vm.toggleEventLog() },
             onDismiss = { vm.closeSettingsDialog() },
+        )
+    }
+    if (ui.cameraDetailsOpen) {
+        // Find the most recent CameraInfo from the hello/status data we've cached.
+        // (We track only model in UiState directly; firmware/serial come from
+        // the hello event payload — pull them from there if cached. For now
+        // we surface what's in UiState plus blank for firmware/serial.)
+        CameraDetailsDialog(
+            state = ui.cameraState,
+            model = ui.cameraModel,
+            firmware = "",
+            serial = "",
+            onDismiss = { vm.closeCameraDetails() },
+        )
+    }
+    if (ui.connectionDetailsOpen) {
+        ConnectionDetailsDialog(
+            wsState = ui.wsState,
+            piHost = ui.piHost,
+            piPort = ui.piPort,
+            discoveryMethod = ui.discoveryMethod,
+            lastPongRttMs = ui.lastPongRttMs,
+            lastImageTs = ui.lastImageTs,
+            onDismiss = { vm.closeConnectionDetails() },
         )
     }
     Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
@@ -168,6 +312,8 @@ private fun ReviewScreen(ui: UiState, current: ImageSummary?, vm: MainViewModel)
                         onCycleLock = { vm.cycleLock() },
                         onToggleExif = { vm.toggleExifPanel() },
                         onOpenSettings = { vm.openSettingsDialog() },
+                        onOpenCameraDetails = { vm.openCameraDetails() },
+                        onOpenConnectionDetails = { vm.openConnectionDetails() },
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(top = 8.dp, end = 12.dp),
@@ -393,6 +539,8 @@ private fun StatusCluster(
     onCycleLock: () -> Unit,
     onToggleExif: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenCameraDetails: () -> Unit,
+    onOpenConnectionDetails: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -416,11 +564,13 @@ private fun StatusCluster(
                 icon = Icons.Filled.PhotoCamera,
                 tint = cameraColor(ui.cameraState),
                 description = "Camera: ${ui.cameraState}",
+                onClick = onOpenCameraDetails,
             )
             StatusIcon(
                 icon = Icons.Filled.WifiTethering,
                 tint = wsColor(ui.wsState),
                 description = "Pi: ${ui.wsState.name}",
+                onClick = onOpenConnectionDetails,
             )
             // EXIF toggle: filled when persistent panel is on, outline when off.
             Box(
@@ -459,12 +609,23 @@ private fun StatusCluster(
 }
 
 @Composable
-private fun StatusIcon(icon: ImageVector, tint: Color, description: String) {
+private fun StatusIcon(
+    icon: ImageVector,
+    tint: Color,
+    description: String,
+    onClick: (() -> Unit)? = null,
+) {
+    val mod = Modifier.size(28.dp)
+    val clickableMod = if (onClick != null) {
+        mod.clip(CircleShape).clickable(onClick = onClick)
+    } else {
+        mod
+    }
     Icon(
         imageVector = icon,
         contentDescription = description,
         tint = tint,
-        modifier = Modifier.size(28.dp),
+        modifier = clickableMod,
     )
 }
 

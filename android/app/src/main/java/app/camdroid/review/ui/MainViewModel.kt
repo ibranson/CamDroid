@@ -5,11 +5,15 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.camdroid.review.Config
 import app.camdroid.review.data.ApiClient
+import app.camdroid.review.data.DiscoveryMethod
+import app.camdroid.review.data.DiscoveryResult
 import app.camdroid.review.data.EventStream
 import app.camdroid.review.data.ImageSummary
 import app.camdroid.review.data.PiAddress
 import app.camdroid.review.data.PiDiscovery
 import app.camdroid.review.data.ServerEvent
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -51,6 +55,16 @@ data class UiState(
     val pressActive: Boolean = false,
     /** Whether the settings placeholder dialog is shown. */
     val settingsDialogOpen: Boolean = false,
+    /** Camera-icon details popup visibility. */
+    val cameraDetailsOpen: Boolean = false,
+    /** Wi-Fi/connection-icon details popup visibility. */
+    val connectionDetailsOpen: Boolean = false,
+    /** Pi connection diagnostics, surfaced in the connection details popup. */
+    val piHost: String? = null,
+    val piPort: Int? = null,
+    val discoveryMethod: DiscoveryMethod? = null,
+    val lastPongRttMs: Long? = null,
+    val lastImageTs: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -75,11 +89,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun bootstrap() {
         appendLog("discovering Pi…")
-        val address = discovery.findPi() ?: run {
+        val result = discovery.findPi() ?: run {
             appendLog("discovery failed; using fallback ${Config.FALLBACK_HOST}")
-            Config.FALLBACK_ADDRESS
+            DiscoveryResult(Config.FALLBACK_ADDRESS, DiscoveryMethod.FALLBACK)
         }
-        appendLog("Pi address: ${address.host}:${address.port}")
+        val address = result.address
+        appendLog("Pi address: ${address.host}:${address.port} (${result.method})")
+        _ui.value = _ui.value.copy(
+            piHost = address.host,
+            piPort = address.port,
+            discoveryMethod = result.method,
+        )
         // Update the global so Composables that build image URLs (thumb,
         // preview, full) see the resolved address.
         Config.setActiveAddress(address)
@@ -170,6 +190,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _ui.value = _ui.value.copy(settingsDialogOpen = false)
     }
 
+    fun openCameraDetails() {
+        recordActivity()
+        _ui.value = _ui.value.copy(cameraDetailsOpen = true)
+    }
+
+    fun closeCameraDetails() {
+        _ui.value = _ui.value.copy(cameraDetailsOpen = false)
+    }
+
+    fun openConnectionDetails() {
+        recordActivity()
+        _ui.value = _ui.value.copy(connectionDetailsOpen = true)
+    }
+
+    fun closeConnectionDetails() {
+        _ui.value = _ui.value.copy(connectionDetailsOpen = false)
+    }
+
     /** Cycles UNLOCKED → HALF_LOCKED → LOCKED → UNLOCKED. */
     fun cycleLock() {
         recordActivity()
@@ -253,13 +291,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun refreshFromStatus() {
         val status = api.fetchStatus() ?: return
         val images = status.recentImages.take(MAX_RECENT_IMAGES)
-        _ui.value = _ui.value.copy(
+        val cur = _ui.value
+        val latestId = images.firstOrNull()?.id
+        // If the user is UNLOCKED and the snapshot has a newer image than what
+        // they were last viewing, jump to latest. This handles the on-wake /
+        // post-reconnect "I missed N captures" scenario without relying on
+        // image_captured event replay (which we don't get for missed events).
+        // LOCKED and HALF_LOCKED stay put — same lock-state semantics that
+        // govern live captures.
+        val newCurrentId = when {
+            cur.currentImageId == null -> latestId
+            cur.lockState == LockState.UNLOCKED && latestId != null && latestId != cur.currentImageId -> latestId
+            else -> cur.currentImageId
+        }
+        _ui.value = cur.copy(
             cameraState = status.camera.state,
             cameraModel = status.camera.info?.model.orEmpty(),
             sessionId = status.sessionId,
             recentImages = images,
-            currentImageId = _ui.value.currentImageId ?: images.firstOrNull()?.id,
+            currentImageId = newCurrentId,
         )
+    }
+
+    /** Called from the Activity's lifecycle when the device wakes / app re-foregrounds
+     *  after a full ON_STOP. Resets the session-scoped lock state — see
+     *  feedback_camdroid_lock_semantics memory. */
+    fun onAppForegroundedAfterStop() {
+        val cur = _ui.value
+        if (cur.lockState != LockState.UNLOCKED) {
+            _ui.value = cur.copy(
+                lockState = LockState.UNLOCKED,
+                halfLockSecondsRemaining = HALF_LOCK_TIMEOUT_SECONDS,
+                secondsLocked = 0,
+                unseenCount = 0,
+            )
+            appendLog("lock reset to UNLOCKED on app re-foreground")
+        }
     }
 
     private fun onEvent(e: ServerEvent) {
@@ -287,6 +354,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     recentImages = recent,
                     currentImageId = newCurrentId,
                     unseenCount = newUnseen,
+                    lastImageTs = img.ts,
                 )
                 appendLog("captured ${img.id}")
             }
@@ -309,7 +377,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _ui.value = _ui.value.copy(recentImages = recent)
                 appendLog("flag: ${e.id} -> ${e.flag}")
             }
-            is ServerEvent.Pong -> { /* silent */ }
+            is ServerEvent.Pong -> {
+                // The Pi echoes back the ts we sent in our ping; compute RTT
+                // from now - that. Surfaced in the connection details popup.
+                val pingTs = e.ts?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                if (pingTs != null) {
+                    val nowSec = System.currentTimeMillis() / 1000.0
+                    val rttMs = ((nowSec - pingTs) * 1000).toLong().coerceAtLeast(0)
+                    _ui.value = _ui.value.copy(lastPongRttMs = rttMs)
+                }
+            }
             is ServerEvent.Error -> appendLog("ERROR ${e.code}: ${e.message}")
             is ServerEvent.Unknown -> appendLog("unknown event: ${e.type}")
         }

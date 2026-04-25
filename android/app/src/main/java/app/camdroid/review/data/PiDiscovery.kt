@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.util.Log
 import app.camdroid.review.Config
 import kotlinx.coroutines.Dispatchers
@@ -34,17 +35,18 @@ class PiDiscovery(private val context: Context) {
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
-    suspend fun findPi(): PiAddress? = withContext(Dispatchers.IO) {
+    suspend fun findPi(): DiscoveryResult? = withContext(Dispatchers.IO) {
         // Path 1: gateway probe (cheap, instant when applicable).
         gatewayPiAddress()?.let { gw ->
             if (probe(gw)) {
                 Log.i(tag, "discovered Pi via gateway: $gw")
-                return@withContext gw
+                return@withContext DiscoveryResult(gw, DiscoveryMethod.GATEWAY)
             }
         }
         // Path 2: NSD discovery with timeout.
-        withTimeoutOrNull(Config.DISCOVERY_TIMEOUT_MS) { discoverViaNsd() }?.also {
+        withTimeoutOrNull(Config.DISCOVERY_TIMEOUT_MS) { discoverViaNsd() }?.let {
             Log.i(tag, "discovered Pi via NSD: $it")
+            DiscoveryResult(it, DiscoveryMethod.NSD)
         }
     }
 
@@ -128,7 +130,12 @@ class PiDiscovery(private val context: Context) {
                     }
 
                     override fun onServiceResolved(resolvedService: NsdServiceInfo) {
-                        val host = resolvedService.host?.hostAddress
+                        val host = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            resolvedService.hostAddresses?.firstOrNull()?.hostAddress
+                        } else {
+                            @Suppress("DEPRECATION")
+                            resolvedService.host?.hostAddress
+                        }
                         val port = resolvedService.port
                         if (host == null || port <= 0) {
                             resolveInProgress = false
@@ -141,6 +148,7 @@ class PiDiscovery(private val context: Context) {
                         if (cont.isActive) cont.resume(PiAddress(host, port))
                     }
                 }
+                @Suppress("DEPRECATION")
                 nsdManager.resolveService(service, resolveListener)
             }
 
@@ -178,3 +186,11 @@ data class PiAddress(val host: String, val port: Int) {
     val baseUrl: String get() = "http://$host:$port"
     val wsUrl: String get() = "ws://$host:$port${Config.API_PREFIX}/events"
 }
+
+enum class DiscoveryMethod {
+    GATEWAY,    // Pi was the network's gateway (typical of AP mode)
+    NSD,        // Found via mDNS/avahi
+    FALLBACK,   // Discovery failed; using Config.FALLBACK_HOST
+}
+
+data class DiscoveryResult(val address: PiAddress, val method: DiscoveryMethod)
