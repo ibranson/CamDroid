@@ -40,6 +40,22 @@ sed -e "s|__USER__|$USER_NAME|g" -e "s|__HOME__|$HOME_DIR|g" "$TEMPLATE" \
 sudo systemctl daemon-reload
 sudo systemctl enable --now camdroid.service
 
+# Avahi service file so Android tablets can discover the Pi over mDNS.
+# Avahi watches /etc/avahi/services/ live; no daemon restart needed.
+AVAHI_SRC="$SCRIPT_DIR/../avahi/camdroid.service"
+AVAHI_DST=/etc/avahi/services/camdroid.service
+if [ -f "$AVAHI_SRC" ]; then
+    sudo cp "$AVAHI_SRC" "$AVAHI_DST"
+    echo "Installed avahi service file -> $AVAHI_DST"
+else
+    echo "warning: avahi service file not found at $AVAHI_SRC; mDNS discovery disabled"
+fi
+
+# Make sure avahi is running.
+if systemctl list-unit-files avahi-daemon.service &>/dev/null; then
+    sudo systemctl enable --now avahi-daemon.service || true
+fi
+
 echo
 echo "Done. Service status:"
 sudo systemctl --no-pager --full status camdroid.service || true
