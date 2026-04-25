@@ -190,6 +190,7 @@ class ImageStorage:
 
     def _init_db(self) -> None:
         with self._db_lock, sqlite3.connect(self._db_path) as conn:
+            # Table + column-independent indexes first.
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS images (
@@ -207,11 +208,17 @@ class ImageStorage:
                     flag TEXT NOT NULL DEFAULT 'none'
                 );
                 CREATE INDEX IF NOT EXISTS idx_captured_at ON images(captured_at DESC);
+                """
+            )
+            # Bring schema up to current shape on legacy databases.
+            self._migrate(conn)
+            # Indexes that depend on possibly-migrated columns must come after.
+            conn.executescript(
+                """
                 CREATE INDEX IF NOT EXISTS idx_favorite ON images(favorite) WHERE favorite = 1;
                 CREATE INDEX IF NOT EXISTS idx_flag ON images(flag) WHERE flag != 'none';
                 """
             )
-            self._migrate(conn)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         """Idempotent column migrations for existing databases that pre-date
