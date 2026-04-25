@@ -22,8 +22,9 @@ import shutil
 import sqlite3
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
@@ -40,6 +41,12 @@ PREVIEW_QUALITY = 85
 THUMB_QUALITY = 80
 
 
+class Flag(str, Enum):
+    NONE = "none"
+    PICK = "pick"
+    REJECT = "reject"
+
+
 @dataclass
 class ImageRecord:
     id: str
@@ -52,10 +59,13 @@ class ImageRecord:
     preview_size: int
     thumb_size: int
     exif: ShootingExif
+    favorite: bool = False
+    flag: Flag = Flag.NONE
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["exif"] = asdict(self.exif)
+        d["flag"] = self.flag.value
         return d
 
 
@@ -124,22 +134,13 @@ class ImageStorage:
 
     def get(self, image_id: str) -> Optional[ImageRecord]:
         with self._db_lock, sqlite3.connect(self._db_path) as conn:
-            row = conn.execute(
-                "SELECT id, captured_at, captured_at_iso, camera_filename, width, height, "
-                "full_size, preview_size, thumb_size, metadata_json "
-                "FROM images WHERE id = ?",
-                (image_id,),
-            ).fetchone()
+            row = conn.execute(_SELECT_COLS + " FROM images WHERE id = ?", (image_id,)).fetchone()
         if row is None:
             return None
         return _row_to_record(row)
 
     def list_recent(self, limit: int = 50, before: Optional[str] = None) -> List[ImageRecord]:
-        sql = (
-            "SELECT id, captured_at, captured_at_iso, camera_filename, width, height, "
-            "full_size, preview_size, thumb_size, metadata_json "
-            "FROM images "
-        )
+        sql = _SELECT_COLS + " FROM images "
         params: tuple = ()
         if before is not None:
             sql += "WHERE id < ? "
@@ -149,6 +150,28 @@ class ImageStorage:
         with self._db_lock, sqlite3.connect(self._db_path) as conn:
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_record(r) for r in rows]
+
+    def set_favorite(self, image_id: str, favorite: bool) -> Optional[ImageRecord]:
+        with self._db_lock, sqlite3.connect(self._db_path) as conn:
+            cur = conn.execute(
+                "UPDATE images SET favorite = ? WHERE id = ?",
+                (1 if favorite else 0, image_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            row = conn.execute(_SELECT_COLS + " FROM images WHERE id = ?", (image_id,)).fetchone()
+        return _row_to_record(row) if row is not None else None
+
+    def set_flag(self, image_id: str, flag: Flag) -> Optional[ImageRecord]:
+        with self._db_lock, sqlite3.connect(self._db_path) as conn:
+            cur = conn.execute(
+                "UPDATE images SET flag = ? WHERE id = ?",
+                (flag.value, image_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            row = conn.execute(_SELECT_COLS + " FROM images WHERE id = ?", (image_id,)).fetchone()
+        return _row_to_record(row) if row is not None else None
 
     def count(self) -> int:
         with self._db_lock, sqlite3.connect(self._db_path) as conn:
@@ -179,11 +202,27 @@ class ImageStorage:
                     full_size INTEGER NOT NULL,
                     preview_size INTEGER NOT NULL,
                     thumb_size INTEGER NOT NULL,
-                    metadata_json TEXT NOT NULL
+                    metadata_json TEXT NOT NULL,
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    flag TEXT NOT NULL DEFAULT 'none'
                 );
                 CREATE INDEX IF NOT EXISTS idx_captured_at ON images(captured_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_favorite ON images(favorite) WHERE favorite = 1;
+                CREATE INDEX IF NOT EXISTS idx_flag ON images(flag) WHERE flag != 'none';
                 """
             )
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Idempotent column migrations for existing databases that pre-date
+        favorite/flag. Safe to run on every startup."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(images)")}
+        if "favorite" not in cols:
+            conn.execute("ALTER TABLE images ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+            log.info("migration: added column 'favorite'")
+        if "flag" not in cols:
+            conn.execute("ALTER TABLE images ADD COLUMN flag TEXT NOT NULL DEFAULT 'none'")
+            log.info("migration: added column 'flag'")
 
     def _insert(self, rec: ImageRecord) -> None:
         meta_json = json.dumps(rec.to_dict())
@@ -220,10 +259,20 @@ class ImageStorage:
         return f"{second_key}_{seq:03d}"
 
 
+_SELECT_COLS = (
+    "SELECT id, captured_at, captured_at_iso, camera_filename, width, height, "
+    "full_size, preview_size, thumb_size, metadata_json, favorite, flag"
+)
+
+
 def _row_to_record(row) -> ImageRecord:
     (id_, captured_at, captured_at_iso, camera_filename, width, height,
-     full_size, preview_size, thumb_size, metadata_json) = row
+     full_size, preview_size, thumb_size, metadata_json, favorite, flag) = row
     meta = json.loads(metadata_json)
+    try:
+        flag_enum = Flag(flag)
+    except ValueError:
+        flag_enum = Flag.NONE
     return ImageRecord(
         id=id_,
         captured_at=captured_at,
@@ -235,4 +284,6 @@ def _row_to_record(row) -> ImageRecord:
         preview_size=preview_size,
         thumb_size=thumb_size,
         exif=ShootingExif(**meta["exif"]),
+        favorite=bool(favorite),
+        flag=flag_enum,
     )

@@ -25,12 +25,14 @@ Server → client, JSON text frames. One JSON object per frame.
 | Type | When | Payload (key fields) |
 |---|---|---|
 | `hello` | Sent immediately on connect | `server_time`, `session_id`, `api_version`, `camera` snapshot |
-| `image_captured` | New file pair pulled from camera | `id`, `ts`, `thumb_url`, `preview_url`, `full_url`, `exif` (iso, shutter, aperture, focal_length) |
+| `image_captured` | New file pair pulled from camera | `id`, `ts`, `thumb_url`, `preview_url`, `full_url`, `exif` (iso, shutter, aperture, focal_length), `favorite`, `flag` |
 | `camera_state` | State machine transition | `from`, `to`, `reason` |
 | `battery` | Camera battery level changed (or every ~60s) | `level_pct` |
 | `card_full` | Camera reports memory card full | `card_slot`, `free_bytes` |
 | `disk_full` | Pi local storage near/at capacity | `path`, `free_bytes`, `threshold_bytes` |
 | `usb_disconnected` | USB camera unexpectedly went away | `reason` |
+| `favorite_changed` | Star toggled on or off for an image | `id`, `favorite`, `ts` |
+| `flag_changed` | Flag value changed for an image | `id`, `flag`, `ts` |
 | `error` | Recoverable error during capture/transfer | `code`, `message`, `recoverable` |
 | `pong` | Reply to client `ping` | `ts` |
 
@@ -54,6 +56,27 @@ Note: `image_captured` includes shooting-essential EXIF (ISO, shutter, aperture,
 | `GET /api/v0/images/{id}/thumb.jpg` | ~256px long edge — grid view. |
 | `GET /api/v0/images/{id}/preview.jpg` | ~2048px long edge — full-screen review and pinch-zoom. |
 | `GET /api/v0/images/{id}/full.jpg` | Original camera JPG, byte-identical to what the Z7/whatever sent over PTP. |
+| `PUT /api/v0/images/{id}/favorite` | Body: `{"favorite": true \| false}`. Sets star state. Returns updated image summary. Broadcasts `favorite_changed`. |
+| `PUT /api/v0/images/{id}/flag` | Body: `{"flag": "none" \| "pick" \| "reject"}`. Sets flag value. Returns updated image summary. Broadcasts `flag_changed`. |
+
+## Image summary shape
+
+The shape returned by `/images`, `/images/{id}`, the `recent_images` array in `/status`, and embedded in the `image_captured` event:
+
+```json
+{
+  "id": "20260424T123456_001",
+  "ts": "2026-04-24T12:34:56.789+00:00",
+  "width": 8256,
+  "height": 5504,
+  "thumb_url": "/api/v0/images/.../thumb.jpg",
+  "preview_url": "/api/v0/images/.../preview.jpg",
+  "full_url": "/api/v0/images/.../full.jpg",
+  "exif": { "iso": 200, "shutter": "1/250", "aperture": 4.0, "focal_length": 70 },
+  "favorite": false,
+  "flag": "none"
+}
+```
 
 ## Camera connection state machine
 

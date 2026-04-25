@@ -22,10 +22,11 @@ from typing import Any, Optional
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from camdroid.camera import Camera, CameraState
 from camdroid.events import EventBus
-from camdroid.storage import ImageRecord, ImageStorage
+from camdroid.storage import Flag, ImageRecord, ImageStorage
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,8 @@ def rec_to_summary(rec: ImageRecord) -> dict[str, Any]:
         "preview_url": f"{API_PREFIX}/images/{rec.id}/preview.jpg",
         "full_url": f"{API_PREFIX}/images/{rec.id}/full.jpg",
         "exif": asdict(rec.exif),
+        "favorite": rec.favorite,
+        "flag": rec.flag.value,
     }
 
 
@@ -72,6 +75,32 @@ def camera_state_event(old: CameraState, new: CameraState, reason: str) -> dict[
         "reason": reason,
         "ts": now_iso(),
     }
+
+
+def favorite_changed_event(rec: ImageRecord) -> dict[str, Any]:
+    return {
+        "type": "favorite_changed",
+        "id": rec.id,
+        "favorite": rec.favorite,
+        "ts": now_iso(),
+    }
+
+
+def flag_changed_event(rec: ImageRecord) -> dict[str, Any]:
+    return {
+        "type": "flag_changed",
+        "id": rec.id,
+        "flag": rec.flag.value,
+        "ts": now_iso(),
+    }
+
+
+class FavoriteUpdate(BaseModel):
+    favorite: bool
+
+
+class FlagUpdate(BaseModel):
+    flag: Flag
 
 
 def build_app(
@@ -129,6 +158,22 @@ def build_app(
     @app.get(f"{API_PREFIX}/images/{{image_id}}/full.jpg")
     def image_full(image_id: str) -> FileResponse:
         return _serve_image(storage.path_full(image_id))
+
+    @app.put(f"{API_PREFIX}/images/{{image_id}}/favorite")
+    def set_favorite(image_id: str, body: FavoriteUpdate) -> dict[str, Any]:
+        rec = storage.set_favorite(image_id, body.favorite)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        bus.publish_threadsafe(favorite_changed_event(rec))
+        return rec_to_summary(rec)
+
+    @app.put(f"{API_PREFIX}/images/{{image_id}}/flag")
+    def set_flag(image_id: str, body: FlagUpdate) -> dict[str, Any]:
+        rec = storage.set_flag(image_id, body.flag)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="image not found")
+        bus.publish_threadsafe(flag_changed_event(rec))
+        return rec_to_summary(rec)
 
     @app.websocket(f"{API_PREFIX}/events")
     async def events_ws(ws: WebSocket) -> None:
