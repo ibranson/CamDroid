@@ -48,12 +48,17 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.GridOff
+import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.WifiTethering
+import androidx.compose.material.icons.outlined.AspectRatio
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.Icon
@@ -90,6 +95,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.drop
 import app.camdroid.review.data.EventStream
 import app.camdroid.review.data.ImageSummary
+import app.camdroid.review.ui.AspectOverlay
+import app.camdroid.review.ui.AspectRatioPicker
 import app.camdroid.review.ui.CameraDetailsDialog
 import app.camdroid.review.ui.ConnectionDetailsDialog
 import app.camdroid.review.ui.ExifPanel
@@ -97,12 +104,10 @@ import app.camdroid.review.ui.LockButton
 import app.camdroid.review.ui.MainViewModel
 import app.camdroid.review.ui.SettingsDialog
 import app.camdroid.review.ui.UiState
+import app.camdroid.review.ui.ZoomableImage
+import app.camdroid.review.ui.rememberImageTransformState
 import app.camdroid.review.ui.theme.CamDroidReviewTheme
 import coil3.compose.AsyncImage
-import me.saket.telephoto.zoomable.ZoomSpec
-import me.saket.telephoto.zoomable.rememberZoomableState
-import me.saket.telephoto.zoomable.zoomable
-
 class MainActivity : ComponentActivity() {
 
     private var hasBeenStopped = false
@@ -125,6 +130,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Always extend the layout into display cutout areas (notches,
+        // punch-holes) — without this, the activity's drawable area changes
+        // shape when system bars hide, which causes ContentScale.Fit to
+        // re-center the image and "slide" it visually. With ALWAYS, the
+        // layout is consistent whether system bars are visible or not.
+        window.attributes.layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
 
         // KEEP_SCREEN_ON is power-aware: held while the tablet is plugged in
         // (active shoot, dock), released on battery (saves drain when the
@@ -257,6 +270,15 @@ private fun ReviewScreen(ui: UiState, current: ImageSummary?, vm: MainViewModel)
             onDismiss = { vm.closeConnectionDetails() },
         )
     }
+    if (ui.aspectPickerOpen) {
+        AspectRatioPicker(
+            currentRatio = ui.aspectRatio,
+            overlayActive = ui.aspectOverlayActive,
+            onSelect = { vm.setAspectRatio(it) },
+            onTurnOff = { vm.turnOffAspectOverlay() },
+            onDismiss = { vm.closeAspectPicker() },
+        )
+    }
     Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
         Box(modifier = Modifier.fillMaxSize()) {
             // Image pager fills the canvas. Each page is a zoomable preview.
@@ -275,6 +297,14 @@ private fun ReviewScreen(ui: UiState, current: ImageSummary?, vm: MainViewModel)
                 ) {
                     EmptyState()
                 }
+            }
+
+            // Aspect-ratio framing overlay. Sits above the image pager, below
+            // all chrome (and below the long-press EXIF popup). Renders OUTSIDE
+            // the chrome AnimatedVisibility — the framing tool is the user's
+            // workspace, not chrome to be hidden.
+            if (ui.aspectOverlayActive) {
+                AspectOverlay(ratio = ui.aspectRatio)
             }
 
             // Long-press EXIF popup. Renders OUTSIDE the chrome AnimatedVisibility
@@ -314,6 +344,9 @@ private fun ReviewScreen(ui: UiState, current: ImageSummary?, vm: MainViewModel)
                         onOpenSettings = { vm.openSettingsDialog() },
                         onOpenCameraDetails = { vm.openCameraDetails() },
                         onOpenConnectionDetails = { vm.openConnectionDetails() },
+                        onToggleAspect = { vm.toggleAspectOverlay() },
+                        onOpenAspectPicker = { vm.openAspectPicker() },
+                        onToggleSnap = { vm.toggleRotationSnap() },
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(top = 8.dp, end = 12.dp),
@@ -432,9 +465,10 @@ private fun ImagePager(ui: UiState, vm: MainViewModel) {
         // the pager updates currentPage to keep the user on the same logical
         // image (critical for LOCKED / HALF_LOCKED to actually feel "locked").
         key = { pageIdx -> images[pageIdx].id },
-        // Each page renders an AsyncImage wrapped in Telephoto's zoomable
-        // modifier. Pinch-zoom, double-tap (default fit <-> 2x), boundary
-        // fling, and one-finger pan when zoomed are all handled by Telephoto.
+        // Each page renders our custom ZoomableImage. Pinch-zoom, two-finger
+        // twist for rotation, boundary clamping, fling momentum, animated
+        // double-tap zoom, and rotation soft-snap are all driven by a single
+        // ImageTransformState — no separate library, single transform matrix.
         // Tap toggles chrome.
     ) { page ->
         val img = images[page]
@@ -444,35 +478,32 @@ private fun ImagePager(ui: UiState, vm: MainViewModel) {
         // image will visibly soften since we're upscaling JPG bytes. True
         // pixel-peep against the full-resolution camera JPG is a future
         // refinement (swap to full.jpg above some zoom threshold).
-        //
         // Key the zoom state on img.id so a fresh state is created whenever
         // the underlying image at this page index changes (e.g. when a new
         // capture arrives and we auto-advance — the new shot starts at fit,
         // not whatever zoom level the prior shot was last at).
-        val zoomState = key(img.id) {
-            rememberZoomableState(zoomSpec = ZoomSpec(maxZoomFactor = 5f))
+        val transformState = key(img.id) {
+            rememberImageTransformState(maxScale = 5f)
         }
-        // Report any pinch/pan activity to the ViewModel so the half-lock
-        // inactivity timer doesn't snap the user away mid-pixel-peep. Also
-        // dismiss the EXIF long-press popup if the user starts zooming —
-        // when they zoom, they want the image, not an overlay obscuring it.
-        LaunchedEffect(zoomState) {
-            snapshotFlow { zoomState.contentTransformation }
-                .drop(1)
-                .collect {
-                    vm.recordActivity()
-                    val zf = zoomState.zoomFraction
-                    if (zf != null && zf > 0f) {
-                        vm.setExifLongPress(false)
-                    }
+        // Fold pinch/pan/twist activity into the half-lock activity tracker
+        // so the timer resets while the user is interacting. Cheap —
+        // recordActivity is a no-op when not in HALF_LOCKED state.
+        LaunchedEffect(transformState) {
+            snapshotFlow {
+                Triple(transformState.scale, transformState.offsetX, transformState.rotation)
+            }.drop(1).collect {
+                vm.recordActivity()
+                if (transformState.scale > 1.001f) {
+                    vm.setExifLongPress(false)
                 }
+            }
         }
-        // Parallel pointer-tracking layer. Tracks "is any finger currently
-        // on the image" as authoritative state, used to:
-        //   (a) freeze the half-lock countdown while pressed (touch = stasis)
-        //   (b) dismiss the EXIF long-press popup on full release.
-        // Uses requireUnconsumed = false so Telephoto's gesture consumption
-        // doesn't hide events from us.
+        // Parallel press-tracking layer on the wrapping Box. Passive observer
+        // (Initial pass, no consume()) so ZoomableImage's gesture detectors
+        // still receive everything they need. Drives the "any finger touching
+        // = stasis" rule for the half-lock timer and dismisses the long-press
+        // EXIF popup on full release. Twist/zoom/pan are now part of
+        // ZoomableImage proper, so this layer just tracks press state.
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -491,30 +522,23 @@ private fun ImagePager(ui: UiState, vm: MainViewModel) {
                     }
                 },
         ) {
-            AsyncImage(
+            ZoomableImage(
                 model = "${Config.BASE_URL}${img.previewUrl}",
                 contentDescription = img.id,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .zoomable(
-                        state = zoomState,
-                        onClick = { vm.toggleChrome() },
-                        onLongClick = {
-                            // Per design: long-press triggers EXIF only at fit.
-                            // When zoomed, long-press just records activity (so
-                            // the half-lock timer pauses). The release-on-finger-up
-                            // dismissal still applies via the parallel pointer
-                            // tracker above.
-                            val zf = zoomState.zoomFraction
-                            val atFit = zf == null || zf == 0f
-                            if (atFit) {
-                                vm.setExifLongPress(true)
-                            } else {
-                                vm.recordActivity()
-                            }
-                        },
-                    ),
+                state = transformState,
+                rotationSnapEnabled = ui.rotationSnapEnabled,
+                onClick = { vm.toggleChrome() },
+                onLongClick = {
+                    // Long-press triggers EXIF only at fit. When zoomed,
+                    // record activity so the half-lock timer pauses. The
+                    // release-on-finger-up dismissal still applies via the
+                    // parallel press-tracking observer on the wrapping Box.
+                    if (transformState.scale <= 1.001f) {
+                        vm.setExifLongPress(true)
+                    } else {
+                        vm.recordActivity()
+                    }
+                },
             )
         }
     }
@@ -541,6 +565,9 @@ private fun StatusCluster(
     onOpenSettings: () -> Unit,
     onOpenCameraDetails: () -> Unit,
     onOpenConnectionDetails: () -> Unit,
+    onToggleAspect: () -> Unit,
+    onOpenAspectPicker: () -> Unit,
+    onToggleSnap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -584,6 +611,58 @@ private fun StatusCluster(
                     imageVector = if (ui.exifPanelToggled) Icons.Filled.Info else Icons.Outlined.Info,
                     contentDescription = if (ui.exifPanelToggled) "Hide EXIF" else "Show EXIF",
                     tint = if (ui.exifPanelToggled) Color(0xFFFFD600) else Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            // Aspect-ratio framing overlay toggle: tap = toggle on/off,
+            // long-press = open the ratio picker. Same color convention as
+            // the EXIF info button — gold when active, white outline when not.
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .combinedClickable(
+                        onClick = onToggleAspect,
+                        onLongClick = onOpenAspectPicker,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (ui.aspectOverlayActive) {
+                        Icons.Filled.AspectRatio
+                    } else {
+                        Icons.Outlined.AspectRatio
+                    },
+                    contentDescription = if (ui.aspectOverlayActive) {
+                        "Hide aspect overlay (long-press to change ratio)"
+                    } else {
+                        "Show aspect overlay (long-press to choose ratio)"
+                    },
+                    tint = if (ui.aspectOverlayActive) Color(0xFFFFD600) else Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            // Rotation soft-snap toggle: when on, twist gestures snap to
+            // cardinals (0/90/180/270°) within ±5°. Persisted across launches.
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onToggleSnap),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (ui.rotationSnapEnabled) {
+                        Icons.Filled.GridOn
+                    } else {
+                        Icons.Filled.GridOff
+                    },
+                    contentDescription = if (ui.rotationSnapEnabled) {
+                        "Rotation snap on (tap to disable)"
+                    } else {
+                        "Rotation snap off (tap to enable)"
+                    },
+                    tint = if (ui.rotationSnapEnabled) Color(0xFFFFD600) else Color.White,
                     modifier = Modifier.size(24.dp),
                 )
             }

@@ -11,6 +11,7 @@ import app.camdroid.review.data.EventStream
 import app.camdroid.review.data.ImageSummary
 import app.camdroid.review.data.PiAddress
 import app.camdroid.review.data.PiDiscovery
+import app.camdroid.review.data.Preferences
 import app.camdroid.review.data.ServerEvent
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -65,6 +66,15 @@ data class UiState(
     val discoveryMethod: DiscoveryMethod? = null,
     val lastPongRttMs: Long? = null,
     val lastImageTs: String? = null,
+    /** Aspect-ratio framing overlay. The current ratio persists across on/off
+     *  toggles within the session so the user doesn't have to re-pick it
+     *  after a quick "show, hide, show again" workflow. Both the ratio and
+     *  the on/off state are persisted to Preferences and restored at launch. */
+    val aspectOverlayActive: Boolean = false,
+    val aspectRatio: AspectRatio = AspectRatios.SQUARE,
+    val aspectPickerOpen: Boolean = false,
+    /** Two-finger-twist soft-snap to cardinals (0/90/180/270°). Persisted. */
+    val rotationSnapEnabled: Boolean = true,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -72,6 +82,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private lateinit var stream: EventStream
     private lateinit var api: ApiClient
     private val discovery = PiDiscovery(application)
+    private val prefs = Preferences(application)
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -82,6 +93,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } ?: _ui.value.recentImages.firstOrNull()
 
     init {
+        // Restore persisted user preferences before any other state runs.
+        val savedRatioLabel = prefs.aspectRatioLabel
+        val savedRatio = AspectRatios.ALL.firstOrNull { it.label == savedRatioLabel }
+            ?: AspectRatios.SQUARE
+        _ui.value = _ui.value.copy(
+            aspectRatio = savedRatio,
+            aspectOverlayActive = prefs.aspectOverlayActive,
+            rotationSnapEnabled = prefs.rotationSnapEnabled,
+        )
+
         // Lock-state timer doesn't depend on the network — start it immediately.
         viewModelScope.launch { lockTimerLoop() }
         viewModelScope.launch { bootstrap() }
@@ -206,6 +227,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeConnectionDetails() {
         _ui.value = _ui.value.copy(connectionDetailsOpen = false)
+    }
+
+    fun toggleAspectOverlay() {
+        recordActivity()
+        val next = !_ui.value.aspectOverlayActive
+        _ui.value = _ui.value.copy(aspectOverlayActive = next)
+        prefs.aspectOverlayActive = next
+    }
+
+    fun setAspectRatio(ratio: AspectRatio) {
+        recordActivity()
+        _ui.value = _ui.value.copy(aspectRatio = ratio, aspectOverlayActive = true)
+        prefs.aspectRatioLabel = ratio.label
+        prefs.aspectOverlayActive = true
+    }
+
+    fun turnOffAspectOverlay() {
+        recordActivity()
+        _ui.value = _ui.value.copy(aspectOverlayActive = false)
+        prefs.aspectOverlayActive = false
+    }
+
+    fun openAspectPicker() {
+        recordActivity()
+        _ui.value = _ui.value.copy(aspectPickerOpen = true)
+    }
+
+    fun closeAspectPicker() {
+        _ui.value = _ui.value.copy(aspectPickerOpen = false)
+    }
+
+    fun toggleRotationSnap() {
+        recordActivity()
+        val next = !_ui.value.rotationSnapEnabled
+        _ui.value = _ui.value.copy(rotationSnapEnabled = next)
+        prefs.rotationSnapEnabled = next
     }
 
     /** Cycles UNLOCKED → HALF_LOCKED → LOCKED → UNLOCKED. */
