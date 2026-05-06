@@ -64,3 +64,5 @@ echo "Tail logs with:    journalctl -u camdroid -f"
 echo "Restart with:      sudo systemctl restart camdroid"
 echo "Stop with:         sudo systemctl stop camdroid"
 echo "Disable autostart: sudo systemctl disable camdroid"
+echo
+echo "Next: for field-mode AP setup, run: sudo ./scripts/install_ap.sh"

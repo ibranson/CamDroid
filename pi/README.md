@@ -71,3 +71,34 @@ sudo systemctl stop camdroid          # stop without disabling autostart
 The default storage root in the systemd unit is `~/camdroid-storage`.
 Edit `systemd/camdroid.service.template` and re-run the install script
 to change it.
+
+## Field-mode Wi-Fi AP
+
+Turn the Pi into its own access point so the tablet connects directly,
+no external router required. Uses NetworkManager's built-in AP/shared
+mode (handles DHCP + DNS in one profile, no hostapd/dnsmasq config).
+
+```bash
+sudo ./scripts/install_ap.sh
+```
+
+The script:
+- Sets the Wi-Fi regulatory country (default `US`, override with
+  `--country GB` etc.)
+- Picks an SSID `CamDroid-XXXX` based on `wlan0`'s MAC suffix
+- Generates a random 12-character passphrase on first run (preserved on
+  re-runs unless you pass `--regenerate`)
+- Removes any other Wi-Fi profiles (this Pi is a field appliance, not a
+  dev box on home Wi-Fi)
+- Activates the profile and prints the SSID + passphrase **once**
+
+Diagnostics and tear-down:
+
+```bash
+./scripts/ap_status.sh         # SSID, passphrase, IP, connected clients
+sudo ./scripts/uninstall_ap.sh # remove the AP profile entirely
+```
+
+The daemon's systemd unit now passes `--bind-interface wlan0`, so the
+API only listens on the AP-side IP. If you reboot, the AP comes up on
+its own and the tablet reconnects automatically.

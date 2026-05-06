@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import logging
+import socket
+import struct
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,11 +37,43 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("storage_root", type=Path, help="Root directory for image storage")
     p.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
     p.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
+    p.add_argument(
+        "--bind-interface",
+        default=None,
+        help=(
+            "Bind only to this interface's IPv4 address (e.g. wlan0). "
+            "Overrides --host. Belt-and-suspenders for AP-mode deployments."
+        ),
+    )
     p.add_argument("--log-level", default="info", help="Log level (default: info)")
     return p.parse_args(argv)
 
 
 RECONNECT_INTERVAL_SECONDS = 5
+SIOCGIFADDR = 0x8915
+
+
+def _resolve_iface_ipv4(ifname: str, retries: int = 30, delay_s: float = 1.0) -> str:
+    """Look up the IPv4 address of `ifname`, retrying while it's still pending.
+
+    NetworkManager can declare itself ready before `wlan0` finishes obtaining
+    its v4 address, so a short retry loop matters at boot. Raises RuntimeError
+    if the address never appears within the budget.
+    """
+    last_err: Exception | None = None
+    for _ in range(retries):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                packed = struct.pack("256s", ifname[:15].encode("ascii"))
+                addr = fcntl.ioctl(s.fileno(), SIOCGIFADDR, packed)
+                return socket.inet_ntoa(addr[20:24])
+        except OSError as e:
+            last_err = e
+            time.sleep(delay_s)
+    raise RuntimeError(
+        f"interface {ifname!r} has no IPv4 address after "
+        f"{retries * delay_s:.0f}s: {last_err}"
+    )
 
 
 def _build_lifespan(*, storage: ImageStorage, staging_dir: Path, session_id: str):
@@ -148,6 +184,13 @@ def main(argv: list[str] | None = None) -> int:
     log.info("staging dir: %s", staging_dir)
     log.info("session id: %s", session_id)
 
+    if args.bind_interface:
+        host = _resolve_iface_ipv4(args.bind_interface)
+        log.info("binding to %s on interface %s", host, args.bind_interface)
+    else:
+        host = args.host
+        log.info("binding to %s", host)
+
     app = FastAPI(
         title="CamDroid",
         version="0.0.1",
@@ -158,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
+    uvicorn.run(app, host=host, port=args.port, log_level=args.log_level)
     return 0
 
 

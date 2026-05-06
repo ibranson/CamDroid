@@ -1,8 +1,10 @@
 [Unit]
 Description=CamDroid daemon
 Documentation=https://github.com/ibranson/CamDroid
-After=network-online.target
-Wants=network-online.target
+After=network-online.target NetworkManager.service
+Wants=network-online.target NetworkManager-wait-online.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -10,11 +12,9 @@ User=__USER__
 Group=__USER__
 WorkingDirectory=__HOME__/CamDroid/pi
 Environment=PATH=__HOME__/CamDroid/pi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=__HOME__/CamDroid/pi/.venv/bin/camdroid __HOME__/camdroid-storage
+ExecStart=__HOME__/CamDroid/pi/.venv/bin/camdroid --bind-interface wlan0 __HOME__/camdroid-storage
 Restart=always
 RestartSec=2
-StartLimitIntervalSec=60
-StartLimitBurst=10
 
 StandardOutput=journal
 StandardError=journal
