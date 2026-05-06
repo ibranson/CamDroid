@@ -94,7 +94,9 @@ if nmcli -t -f NAME connection show | grep -Fxq "$PROFILE_NAME"; then
 fi
 
 if [ "$REGENERATE" -eq 1 ] || [ -z "$existing_psk" ]; then
-    PSK="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)"
+    # secrets.choice for crypto-grade randomness; avoids the
+    # tr|head SIGPIPE+pipefail trap that silently kills set -e scripts.
+    PSK="$(python3 -c 'import secrets, string; alphabet = string.ascii_letters + string.digits; print("".join(secrets.choice(alphabet) for _ in range(12)))')"
     psk_is_new=1
 else
     PSK="$existing_psk"
