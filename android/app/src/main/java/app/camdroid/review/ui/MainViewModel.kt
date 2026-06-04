@@ -5,16 +5,18 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.camdroid.review.Config
 import app.camdroid.review.data.ApiClient
+import app.camdroid.review.data.BridgeAddress
+import app.camdroid.review.data.BridgeDiscovery
 import app.camdroid.review.data.DiscoveryMethod
 import app.camdroid.review.data.DiscoveryResult
 import app.camdroid.review.data.EventStream
 import app.camdroid.review.data.ImageSummary
-import app.camdroid.review.data.PiAddress
-import app.camdroid.review.data.PiDiscovery
 import app.camdroid.review.data.Preferences
 import app.camdroid.review.data.ServerEvent
+import app.camdroid.review.data.ThemeMode
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,16 +56,20 @@ data class UiState(
     /** Any finger currently touching the image. Source of truth for "user is
      *  actively engaged" — suppresses half-lock expiry whenever true. */
     val pressActive: Boolean = false,
-    /** Whether the settings placeholder dialog is shown. */
-    val settingsDialogOpen: Boolean = false,
+    /** Whether the full-screen settings UI is shown. */
+    val settingsScreenOpen: Boolean = false,
     /** Camera-icon details popup visibility. */
     val cameraDetailsOpen: Boolean = false,
     /** Wi-Fi/connection-icon details popup visibility. */
     val connectionDetailsOpen: Boolean = false,
-    /** Pi connection diagnostics, surfaced in the connection details popup. */
-    val piHost: String? = null,
-    val piPort: Int? = null,
+    /** Bridge connection diagnostics, surfaced in the connection details popup. */
+    val bridgeHost: String? = null,
+    val bridgePort: Int? = null,
     val discoveryMethod: DiscoveryMethod? = null,
+    /** True while a manual "Find bridge" action is in flight. */
+    val bridgeProbing: Boolean = false,
+    /** Last user-visible message from a Find-bridge attempt. Cleared on next probe. */
+    val bridgeProbeMessage: String? = null,
     val lastPongRttMs: Long? = null,
     val lastImageTs: String? = null,
     /** Aspect-ratio framing overlay. The current ratio persists across on/off
@@ -75,14 +81,22 @@ data class UiState(
     val aspectPickerOpen: Boolean = false,
     /** Two-finger-twist soft-snap to cardinals (0/90/180/270°). Persisted. */
     val rotationSnapEnabled: Boolean = true,
+    /** Persistent: app theme preference. */
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    /** Persistent: when UNLOCKED, jump to the newest capture as it arrives. */
+    val autoShowOnCapture: Boolean = true,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private lateinit var stream: EventStream
     private lateinit var api: ApiClient
-    private val discovery = PiDiscovery(application)
+    private val discovery = BridgeDiscovery(application)
     private val prefs = Preferences(application)
+    /** Background coroutines that wrap the active EventStream. Cancelled and
+     *  re-launched on every [activate] so a re-targeted bridge address doesn't
+     *  leak collectors against the old stream. */
+    private val streamJobs = mutableListOf<Job>()
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -101,6 +115,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             aspectRatio = savedRatio,
             aspectOverlayActive = prefs.aspectOverlayActive,
             rotationSnapEnabled = prefs.rotationSnapEnabled,
+            exifPanelToggled = prefs.exifPanelDefault,
+            showEventLog = prefs.eventLogDefault,
+            themeMode = prefs.themeMode,
+            autoShowOnCapture = prefs.autoShowOnCapture,
         )
 
         // Lock-state timer doesn't depend on the network — start it immediately.
@@ -109,33 +127,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun bootstrap() {
-        appendLog("discovering Pi…")
-        val result = discovery.findPi() ?: run {
+        // Manual override beats discovery: the user explicitly pinned an address
+        // last time, so honour it without a probe round-trip.
+        val manualHost = prefs.manualBridgeHost
+        if (!manualHost.isNullOrBlank()) {
+            val addr = BridgeAddress(manualHost, prefs.manualBridgePort)
+            appendLog("using manual bridge: ${addr.host}:${addr.port}")
+            activate(addr, DiscoveryMethod.MANUAL)
+            return
+        }
+
+        appendLog("discovering bridge…")
+        val result = discovery.findBridge() ?: run {
             appendLog("discovery failed; using fallback ${Config.FALLBACK_HOST}")
             DiscoveryResult(Config.FALLBACK_ADDRESS, DiscoveryMethod.FALLBACK)
         }
-        val address = result.address
-        appendLog("Pi address: ${address.host}:${address.port} (${result.method})")
-        _ui.value = _ui.value.copy(
-            piHost = address.host,
-            piPort = address.port,
-            discoveryMethod = result.method,
-        )
-        // Update the global so Composables that build image URLs (thumb,
-        // preview, full) see the resolved address.
+        appendLog("bridge address: ${result.address.host}:${result.address.port} (${result.method})")
+        activate(result.address, result.method)
+    }
+
+    /**
+     * Wire (or re-wire) the EventStream and ApiClient to a new bridge address.
+     * Cancels any existing collectors so they don't leak against the old socket.
+     */
+    private fun activate(address: BridgeAddress, method: DiscoveryMethod) {
+        // Tear down previous wiring if this is a re-target.
+        streamJobs.forEach { it.cancel() }
+        streamJobs.clear()
+        if (::stream.isInitialized) stream.shutdown()
+
         Config.setActiveAddress(address)
         stream = EventStream(address.wsUrl)
         api = ApiClient(address.baseUrl)
 
-        viewModelScope.launch {
+        _ui.value = _ui.value.copy(
+            bridgeHost = address.host,
+            bridgePort = address.port,
+            discoveryMethod = method,
+            // Drop session-derived state so a re-target can't show stale info from
+            // the previous bridge.
+            sessionId = null,
+            recentImages = emptyList(),
+            currentImageId = null,
+            lastPongRttMs = null,
+            lastImageTs = null,
+        )
+
+        streamJobs += viewModelScope.launch {
             stream.state.collect { s ->
                 _ui.value = _ui.value.copy(wsState = s)
                 appendLog("ws -> $s")
                 if (s == EventStream.ConnectionState.CONNECTED) refreshFromStatus()
             }
         }
-        viewModelScope.launch { stream.events.collect(::onEvent) }
-        viewModelScope.launch {
+        streamJobs += viewModelScope.launch { stream.events.collect(::onEvent) }
+        streamJobs += viewModelScope.launch {
             while (true) {
                 delay(10_000)
                 if (_ui.value.wsState == EventStream.ConnectionState.CONNECTED) stream.sendPing()
@@ -145,6 +191,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        streamJobs.forEach { it.cancel() }
+        streamJobs.clear()
         if (::stream.isInitialized) stream.shutdown()
         super.onCleared()
     }
@@ -180,12 +228,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleEventLog() {
         recordActivity()
-        _ui.value = _ui.value.copy(showEventLog = !_ui.value.showEventLog)
+        val next = !_ui.value.showEventLog
+        _ui.value = _ui.value.copy(showEventLog = next)
+        prefs.eventLogDefault = next
     }
 
     fun toggleExifPanel() {
         recordActivity()
-        _ui.value = _ui.value.copy(exifPanelToggled = !_ui.value.exifPanelToggled)
+        val next = !_ui.value.exifPanelToggled
+        _ui.value = _ui.value.copy(exifPanelToggled = next)
+        prefs.exifPanelDefault = next
     }
 
     fun setExifLongPress(active: Boolean) {
@@ -202,13 +254,73 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun openSettingsDialog() {
+    fun openSettings() {
         recordActivity()
-        _ui.value = _ui.value.copy(settingsDialogOpen = true)
+        _ui.value = _ui.value.copy(settingsScreenOpen = true)
     }
 
-    fun closeSettingsDialog() {
-        _ui.value = _ui.value.copy(settingsDialogOpen = false)
+    fun closeSettings() {
+        _ui.value = _ui.value.copy(settingsScreenOpen = false, bridgeProbeMessage = null)
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        _ui.value = _ui.value.copy(themeMode = mode)
+        prefs.themeMode = mode
+    }
+
+    fun setAutoShowOnCapture(value: Boolean) {
+        _ui.value = _ui.value.copy(autoShowOnCapture = value)
+        prefs.autoShowOnCapture = value
+    }
+
+    /**
+     * Re-run discovery. Clears any manual-override pin so this becomes the
+     * authoritative new address. Updates UI state through the probe.
+     */
+    fun findBridge() {
+        recordActivity()
+        if (_ui.value.bridgeProbing) return
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(bridgeProbing = true, bridgeProbeMessage = "Probing…")
+            prefs.clearManualBridge()
+            val result = discovery.findBridge()
+            if (result != null) {
+                _ui.value = _ui.value.copy(
+                    bridgeProbing = false,
+                    bridgeProbeMessage = "Found via ${result.method.name.lowercase()}",
+                )
+                activate(result.address, result.method)
+            } else {
+                _ui.value = _ui.value.copy(
+                    bridgeProbing = false,
+                    bridgeProbeMessage = "Bridge not found; using fallback",
+                )
+                activate(Config.FALLBACK_ADDRESS, DiscoveryMethod.FALLBACK)
+            }
+        }
+    }
+
+    /**
+     * Pin an explicit bridge address. Persisted across launches; clears any
+     * prior probe message and immediately retargets the stream.
+     */
+    fun setManualBridgeAddress(host: String, port: Int) {
+        recordActivity()
+        val cleanedHost = host.trim()
+        if (cleanedHost.isEmpty()) return
+        prefs.manualBridgeHost = cleanedHost
+        prefs.manualBridgePort = port
+        _ui.value = _ui.value.copy(bridgeProbeMessage = "Pinned to $cleanedHost:$port")
+        activate(BridgeAddress(cleanedHost, port), DiscoveryMethod.MANUAL)
+    }
+
+    /** Drop and immediately re-open the events socket. */
+    fun reconnectWebSocket() {
+        recordActivity()
+        if (!::stream.isInitialized) return
+        stream.close()
+        stream.connect()
+        appendLog("ws reconnect requested")
     }
 
     fun openCameraDetails() {
@@ -401,9 +513,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val cur = _ui.value
                 val recent = (listOf(img) + cur.recentImages.filterNot { it.id == img.id })
                     .take(MAX_RECENT_IMAGES)
-                // Auto-advance behavior depends on lock state.
+                // Auto-advance behavior depends on lock state and user preference.
                 val newCurrentId = when (cur.lockState) {
-                    LockState.UNLOCKED -> img.id
+                    LockState.UNLOCKED -> if (cur.autoShowOnCapture) img.id else (cur.currentImageId ?: img.id)
                     LockState.HALF_LOCKED, LockState.LOCKED -> cur.currentImageId
                 }
                 val newUnseen = if (cur.lockState == LockState.LOCKED) cur.unseenCount + 1 else cur.unseenCount

@@ -40,7 +40,7 @@ fun CameraDetailsDialog(
                 LabelValue("Serial", serial.ifEmpty { "(not reported)" })
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "Battery, lens, and shots-on-card will appear here once the Pi daemon starts polling and broadcasting them.",
+                    "Battery, lens, and shots-on-card will appear here once the bridge daemon starts polling and broadcasting them.",
                     fontSize = 12.sp,
                 )
             }

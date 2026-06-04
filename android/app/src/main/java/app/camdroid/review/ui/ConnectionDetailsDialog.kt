@@ -24,8 +24,8 @@ import java.util.Locale
 @Composable
 fun ConnectionDetailsDialog(
     wsState: EventStream.ConnectionState,
-    piHost: String?,
-    piPort: Int?,
+    bridgeHost: String?,
+    bridgePort: Int?,
     discoveryMethod: DiscoveryMethod?,
     lastPongRttMs: Long?,
     lastImageTs: String?,
@@ -33,11 +33,11 @@ fun ConnectionDetailsDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Pi connection") },
+        title = { Text("Bridge connection") },
         text = {
             Column {
                 LabelValue("WS", wsState.name)
-                val addr = if (piHost != null && piPort != null) "$piHost:$piPort" else "(unknown)"
+                val addr = if (bridgeHost != null && bridgePort != null) "$bridgeHost:$bridgePort" else "(unknown)"
                 LabelValue("Address", addr)
                 LabelValue(
                     "Found via",
@@ -67,6 +67,7 @@ fun ConnectionDetailsDialog(
 private fun methodLabel(m: DiscoveryMethod): String = when (m) {
     DiscoveryMethod.GATEWAY -> "Gateway probe"
     DiscoveryMethod.NSD -> "mDNS / Bonjour"
+    DiscoveryMethod.MANUAL -> "Manual override"
     DiscoveryMethod.FALLBACK -> "Fallback IP (discovery failed)"
 }
 

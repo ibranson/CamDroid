@@ -14,43 +14,46 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 /**
- * Resolves the Pi's address on the local network without the user typing an
- * IP. Two paths, tried in priority order:
+ * Resolves the bridge's address on the local network without the user typing
+ * an IP. Two paths, tried in priority order:
  *
- *   1. Gateway-IP probe — when the tablet is on the Pi's own AP, the Pi *is*
- *      the gateway. Read its IP from WifiManager.dhcpInfo and probe the
- *      v0/status endpoint. Zero round-trips beyond a single HTTP HEAD.
- *      (Will fall through quickly when Pi is not the gateway, e.g. during
- *      development on home Wi-Fi.)
+ *   1. Gateway-IP probe — when the tablet is on the bridge's own AP, the
+ *      bridge *is* the gateway. Read its IP from WifiManager.dhcpInfo and
+ *      probe the v0/status endpoint. Zero round-trips beyond a single HTTP
+ *      HEAD. (Will fall through quickly when the bridge is not the gateway,
+ *      e.g. during development on home Wi-Fi.)
  *
- *   2. mDNS / NSD discovery — Avahi on the Pi advertises _camdroid._tcp via
- *      the service file at pi/avahi/camdroid.service. Android's NsdManager
- *      enumerates and resolves it.
+ *   2. mDNS / NSD discovery — Avahi on the bridge advertises _camdroid._tcp
+ *      via the service file at pi/avahi/camdroid.service. Android's
+ *      NsdManager enumerates and resolves it.
+ *
+ * A user-pinned manual override is consulted by the ViewModel before this
+ * class is invoked; see Preferences.manualBridgeHost.
  *
  * Returns the resolved address, or null if both fail within the timeout.
  */
-class PiDiscovery(private val context: Context) {
+class BridgeDiscovery(private val context: Context) {
 
-    private val tag = "PiDiscovery"
+    private val tag = "BridgeDiscovery"
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
-    suspend fun findPi(): DiscoveryResult? = withContext(Dispatchers.IO) {
+    suspend fun findBridge(): DiscoveryResult? = withContext(Dispatchers.IO) {
         // Path 1: gateway probe (cheap, instant when applicable).
-        gatewayPiAddress()?.let { gw ->
+        gatewayBridgeAddress()?.let { gw ->
             if (probe(gw)) {
-                Log.i(tag, "discovered Pi via gateway: $gw")
+                Log.i(tag, "discovered bridge via gateway: $gw")
                 return@withContext DiscoveryResult(gw, DiscoveryMethod.GATEWAY)
             }
         }
         // Path 2: NSD discovery with timeout.
         withTimeoutOrNull(Config.DISCOVERY_TIMEOUT_MS) { discoverViaNsd() }?.let {
-            Log.i(tag, "discovered Pi via NSD: $it")
+            Log.i(tag, "discovered bridge via NSD: $it")
             DiscoveryResult(it, DiscoveryMethod.NSD)
         }
     }
 
-    private fun gatewayPiAddress(): PiAddress? {
+    private fun gatewayBridgeAddress(): BridgeAddress? {
         @Suppress("DEPRECATION")
         val info = wifiManager.dhcpInfo ?: return null
         val ip = info.gateway
@@ -63,10 +66,10 @@ class PiDiscovery(private val context: Context) {
             ip shr 16 and 0xff,
             ip shr 24 and 0xff,
         )
-        return PiAddress(host, Config.FALLBACK_PORT)
+        return BridgeAddress(host, Config.FALLBACK_PORT)
     }
 
-    private suspend fun probe(addr: PiAddress): Boolean = withContext(Dispatchers.IO) {
+    suspend fun probe(addr: BridgeAddress): Boolean = withContext(Dispatchers.IO) {
         try {
             val url = java.net.URL("${addr.baseUrl}${Config.API_PREFIX}/status?limit=1")
             val conn = url.openConnection() as java.net.HttpURLConnection
@@ -82,7 +85,7 @@ class PiDiscovery(private val context: Context) {
         }
     }
 
-    private suspend fun discoverViaNsd(): PiAddress? = suspendCancellableCoroutine { cont ->
+    private suspend fun discoverViaNsd(): BridgeAddress? = suspendCancellableCoroutine { cont ->
         // Multicast lock — some Wi-Fi chipsets drop multicast packets unless
         // the app explicitly asks for them. Always safe to acquire.
         val multicastLock = wifiManager.createMulticastLock("camdroid-nsd").also {
@@ -145,7 +148,7 @@ class PiDiscovery(private val context: Context) {
                         try {
                             nsdManager.stopServiceDiscovery(listener!!)
                         } catch (_: Exception) { }
-                        if (cont.isActive) cont.resume(PiAddress(host, port))
+                        if (cont.isActive) cont.resume(BridgeAddress(host, port))
                     }
                 }
                 @Suppress("DEPRECATION")
@@ -182,15 +185,16 @@ class PiDiscovery(private val context: Context) {
     }
 }
 
-data class PiAddress(val host: String, val port: Int) {
+data class BridgeAddress(val host: String, val port: Int) {
     val baseUrl: String get() = "http://$host:$port"
     val wsUrl: String get() = "ws://$host:$port${Config.API_PREFIX}/events"
 }
 
 enum class DiscoveryMethod {
-    GATEWAY,    // Pi was the network's gateway (typical of AP mode)
+    GATEWAY,    // Bridge was the network's gateway (typical of AP mode)
     NSD,        // Found via mDNS/avahi
+    MANUAL,     // User pinned an explicit address in settings
     FALLBACK,   // Discovery failed; using Config.FALLBACK_HOST
 }
 
-data class DiscoveryResult(val address: PiAddress, val method: DiscoveryMethod)
+data class DiscoveryResult(val address: BridgeAddress, val method: DiscoveryMethod)

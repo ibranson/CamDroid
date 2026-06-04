@@ -60,7 +60,7 @@ class ConnectionService : Service() {
             "Connection",
             NotificationManager.IMPORTANCE_LOW,  // no sound, no vibrate
         ).apply {
-            description = "Keeps the connection to the Pi alive while CamDroid Review is open"
+            description = "Keeps the connection to the bride alive while CamDroid is open"
             setShowBadge(false)
         }
         nm.createNotificationChannel(channel)
@@ -79,7 +79,7 @@ class ConnectionService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("CamDroid Review")
-            .setContentText("Keeping the connection to the Pi alive")
+            .setContentText("Keeping the connection to the bridge alive")
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
             .setContentIntent(openIntent)

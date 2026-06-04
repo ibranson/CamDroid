@@ -16,9 +16,15 @@ if nmcli -t -f NAME connection show | grep -Fxq "$PROFILE_NAME"; then
     nmcli -t -f NAME,STATE,DEVICE connection show --active | grep "^$PROFILE_NAME:" \
         || echo "$PROFILE_NAME exists but is not active"
     ssid="$(nmcli -g 802-11-wireless.ssid connection show "$PROFILE_NAME" 2>/dev/null || echo '?')"
-    psk="$(nmcli -s -g 802-11-wireless-security.psk connection show "$PROFILE_NAME" 2>/dev/null || echo '?')"
+    psk="$(nmcli -s -g 802-11-wireless-security.psk connection show "$PROFILE_NAME" 2>/dev/null || true)"
     echo "  SSID:       $ssid"
-    echo "  Passphrase: $psk"
+    if [ -n "$psk" ]; then
+        echo "  Passphrase: $psk"
+    elif [ "$EUID" -ne 0 ]; then
+        echo "  Passphrase: (re-run with sudo to reveal)"
+    else
+        echo "  Passphrase: (not set on profile)"
+    fi
 else
     echo "$PROFILE_NAME profile not installed. Run scripts/install_ap.sh."
     exit 0

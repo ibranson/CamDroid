@@ -102,7 +102,7 @@ import app.camdroid.review.ui.ConnectionDetailsDialog
 import app.camdroid.review.ui.ExifPanel
 import app.camdroid.review.ui.LockButton
 import app.camdroid.review.ui.MainViewModel
-import app.camdroid.review.ui.SettingsDialog
+import app.camdroid.review.ui.SettingsScreen
 import app.camdroid.review.ui.UiState
 import app.camdroid.review.ui.ZoomableImage
 import app.camdroid.review.ui.rememberImageTransformState
@@ -166,11 +166,27 @@ class MainActivity : ComponentActivity() {
         })
 
         setContent {
-            CamDroidReviewTheme {
-                val vm: MainViewModel = viewModel()
-                viewModelInstance = vm
-                val ui by vm.ui.collectAsState()
-                ReviewScreen(ui = ui, current = vm.currentImage, vm = vm)
+            val vm: MainViewModel = viewModel()
+            viewModelInstance = vm
+            val ui by vm.ui.collectAsState()
+            CamDroidReviewTheme(themeMode = ui.themeMode) {
+                if (ui.settingsScreenOpen) {
+                    SettingsScreen(
+                        ui = ui,
+                        onBack = { vm.closeSettings() },
+                        onFindBridge = { vm.findBridge() },
+                        onSetManualAddress = { host, port -> vm.setManualBridgeAddress(host, port) },
+                        onToggleEventLog = { vm.toggleEventLog() },
+                        onToggleExifPanel = { vm.toggleExifPanel() },
+                        onToggleAspectOverlay = { vm.toggleAspectOverlay() },
+                        onToggleRotationSnap = { vm.toggleRotationSnap() },
+                        onSetThemeMode = { vm.setThemeMode(it) },
+                        onSetAutoShowOnCapture = { vm.setAutoShowOnCapture(it) },
+                        onReconnectWebSocket = { vm.reconnectWebSocket() },
+                    )
+                } else {
+                    ReviewScreen(ui = ui, current = vm.currentImage, vm = vm)
+                }
             }
         }
     }
@@ -237,15 +253,6 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ReviewScreen(ui: UiState, current: ImageSummary?, vm: MainViewModel) {
     ImmersiveSystemBars(visible = ui.chromeVisible)
-    if (ui.settingsDialogOpen) {
-        SettingsDialog(
-            sessionId = ui.sessionId,
-            cameraModel = ui.cameraModel,
-            eventLogVisible = ui.showEventLog,
-            onToggleEventLog = { vm.toggleEventLog() },
-            onDismiss = { vm.closeSettingsDialog() },
-        )
-    }
     if (ui.cameraDetailsOpen) {
         // Find the most recent CameraInfo from the hello/status data we've cached.
         // (We track only model in UiState directly; firmware/serial come from
@@ -262,8 +269,8 @@ private fun ReviewScreen(ui: UiState, current: ImageSummary?, vm: MainViewModel)
     if (ui.connectionDetailsOpen) {
         ConnectionDetailsDialog(
             wsState = ui.wsState,
-            piHost = ui.piHost,
-            piPort = ui.piPort,
+            bridgeHost = ui.bridgeHost,
+            bridgePort = ui.bridgePort,
             discoveryMethod = ui.discoveryMethod,
             lastPongRttMs = ui.lastPongRttMs,
             lastImageTs = ui.lastImageTs,
@@ -341,7 +348,7 @@ private fun ReviewScreen(ui: UiState, current: ImageSummary?, vm: MainViewModel)
                         ui = ui,
                         onCycleLock = { vm.cycleLock() },
                         onToggleExif = { vm.toggleExifPanel() },
-                        onOpenSettings = { vm.openSettingsDialog() },
+                        onOpenSettings = { vm.openSettings() },
                         onOpenCameraDetails = { vm.openCameraDetails() },
                         onOpenConnectionDetails = { vm.openConnectionDetails() },
                         onToggleAspect = { vm.toggleAspectOverlay() },
@@ -596,7 +603,7 @@ private fun StatusCluster(
             StatusIcon(
                 icon = Icons.Filled.WifiTethering,
                 tint = wsColor(ui.wsState),
-                description = "Pi: ${ui.wsState.name}",
+                description = "Bridge: ${ui.wsState.name}",
                 onClick = onOpenConnectionDetails,
             )
             // EXIF toggle: filled when persistent panel is on, outline when off.
